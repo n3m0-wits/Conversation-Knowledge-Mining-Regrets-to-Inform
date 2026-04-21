@@ -770,7 +770,7 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
                 "from": {"emailAddress": {"address": str(sender or "").strip()}},
                 "toRecipients": [
                     {"emailAddress": {"address": address.strip()}}
-                    # live input shape: "to", historical shape fallback: "to_addresses"
+                    # live payloads may use either "to" or "to_addresses"
                     for address in (
                         str(message.get("to") or message.get("to_addresses") or "")
                     ).split(",")
@@ -794,11 +794,19 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
                     or message.get("body", {}).get("content", "")
                 ),
             }
-        email_message = _to_email_message(message, source_folder="live")
+        email_message = _to_email_message(
+            message,
+            source_folder=args.live_source_folder or "live",
+        )
         if email_message.message_key:
             deduped[email_message.message_key] = email_message
         else:
-            print("⚠ Skipping live email with no id/internetMessageId")
+            from_address = _extract_from_field(message)
+            subject = (message.get("subject") or "").strip()
+            print(
+                "⚠ Skipping live email with no id/internetMessageId: "
+                f"from={from_address or 'unknown'}, subject={subject or 'unknown'}"
+            )
     return list(deduped.values())
 
 

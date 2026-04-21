@@ -612,7 +612,8 @@ python "${pythonScriptPath}04_cu_process_custom_data.py" \
     --graph_mail_folders "${GRAPH_MAIL_FOLDERS:-Inbox}" \
     --graph_backfill_limit "${GRAPH_BACKFILL_LIMIT:-500}" \
     --ingestion_source "${INGESTION_SOURCE:-historical}" \
-    --live_emails_path "${LIVE_EMAILS_PATH:-}"
+    --live_emails_path "${LIVE_EMAILS_PATH:-}" \
+    --live_source_folder "${LIVE_SOURCE_FOLDER:-live}"
 
 if [ $? -ne 0 ]; then
 	echo "Error: 04_cu_process_custom_data.py failed."
