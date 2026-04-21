@@ -750,7 +750,9 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
     if isinstance(payload, dict):
         payload = payload.get("emails", [])
     if not isinstance(payload, list):
-        raise ValueError("Live email payload must be a JSON array or {\"emails\": [...]}")
+        raise ValueError(
+            "Live email payload must be a JSON array or an object with an 'emails' array"
+        )
 
     deduped: dict[str, EmailMessage] = {}
     for message in payload:
@@ -768,6 +770,7 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
                 "from": {"emailAddress": {"address": str(sender or "").strip()}},
                 "toRecipients": [
                     {"emailAddress": {"address": address.strip()}}
+                    # live input shape: "to", historical shape fallback: "to_addresses"
                     for address in (
                         str(message.get("to") or message.get("to_addresses") or "")
                     ).split(",")
@@ -794,6 +797,8 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
         email_message = _to_email_message(message, source_folder="live")
         if email_message.message_key:
             deduped[email_message.message_key] = email_message
+        else:
+            print("⚠ Skipping live email with no id/internetMessageId")
     return list(deduped.values())
 
 
