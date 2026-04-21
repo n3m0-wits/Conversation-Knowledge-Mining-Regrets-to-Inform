@@ -1,67 +1,105 @@
 {
-  "analyzerId": "ckm-analyzer-text",
-  "name": "ckm-analyzer-text",
+  "analyzerId": "ckm-json",
+  "name": "ckm-json",
   "scenario": "text",
-  "description": "Conversation analytics",
+  "description": "Outlook job-search email analytics",
   "tags": {
     "projectId": "",
-    "templateId": "postCallAnalytics-2024-12-01"
+    "templateId": "emailAnalytics-2026-04-21"
   },
   "config": {
     "returnDetails": true
   },
   "fieldSchema": {
-    "name": "CallCenterConversationAnalysis",
-    "descriptions": "Content, Summary, sentiment, and more analyses from a call center conversation",
+    "name": "OutlookJobEmailAnalysis",
+    "descriptions": "Extract job-search signals and required actions from Outlook emails",
     "fields": {
-      "content": {
+      "company": {
         "type": "string",
         "method": "generate",
-        "description": "Full text of the conversation"
+        "description": "Legal company name if present; else Unknown"
       },
-      "Duration": {
+      "portal": {
         "type": "string",
         "method": "generate",
-        "description": "Find out how long the conversation lasted in seconds"
+        "description": "Application portal name such as Simplify, Workday, SmartRecruiters; else Unknown"
+      },
+      "category": {
+        "type": "string",
+        "method": "classify",
+        "description": "Classify the email into one category",
+        "enum": [
+          "Job Ad",
+          "Recruiter Reach-out",
+          "Bot/Auto-Reply",
+          "Confirmation of Application",
+          "Rejection",
+          "Request for Information",
+          "Technical Test Request",
+          "Personality Test Request",
+          "Interview Invitation",
+          "Job Offer",
+          "Unknown",
+          "Not Job Related"
+        ]
+      },
+      "is_automated": {
+        "type": "boolean",
+        "method": "classify",
+        "description": "Whether the email appears automated"
+      },
+      "deadline": {
+        "type": "string",
+        "method": "generate",
+        "description": "Any explicit deadline date/time if mentioned"
+      },
+      "urgency": {
+        "type": "string",
+        "method": "classify",
+        "description": "Urgency level based on deadlines",
+        "enum": [
+          "High",
+          "Medium",
+          "Low"
+        ]
+      },
+      "interview_type": {
+        "type": "string",
+        "method": "classify",
+        "description": "Interview mode when present",
+        "enum": [
+          "Online-Live",
+          "In-Person",
+          "One-Way-Robot",
+          "Phone-Call",
+          "Unclear",
+          "None"
+        ]
+      },
+      "interview_platform": {
+        "type": "string",
+        "method": "generate",
+        "description": "Interview platform e.g. Teams, Zoom; else None"
+      },
+      "test_platform": {
+        "type": "string",
+        "method": "generate",
+        "description": "Test platform e.g. Codility, LeetCode; else None"
+      },
+      "test_duration_mins": {
+        "type": "integer",
+        "method": "generate",
+        "description": "Assessment duration in minutes if specified"
+      },
+      "action_required": {
+        "type": "boolean",
+        "method": "classify",
+        "description": "Whether the candidate must take action"
       },
       "summary": {
         "type": "string",
         "method": "generate",
-        "description": "Summarize the conversation"
-      },
-      "satisfied": {
-        "type": "string",
-        "method": "classify",
-        "description": "Is the customer satisfied with the agent interaction",
-        "enum": [
-          "Yes",
-          "No"
-        ]
-      },
-      "sentiment": {
-        "type": "string",
-        "method": "classify",
-        "description": "Identify the sentiment of the conversation",
-        "enum": [
-          "Positive",
-          "Neutral",
-          "Negative"
-        ]
-      },
-      "topic": {
-        "type": "string",
-        "method": "generate",
-        "description": "Identify the single primary topic of the conversation in 6 words or less"
-      },
-      "keyPhrases": {
-        "type": "string",
-        "method": "generate",
-        "description": "Identify the top 10 key phrases as comma separated string excluding people names"
-      },
-      "complaint": {
-        "type": "string",
-        "method": "generate",
-        "description": "Identify the single primary complaint of the conversation in 3 words or less"
+        "description": "Summarize the next required action in 25 words or fewer"
       }
     }
   }

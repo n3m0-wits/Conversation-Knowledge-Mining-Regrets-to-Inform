@@ -30,7 +30,7 @@ from common.config.config import Config
 
 # Constants
 HOST_NAME = "CKM"
-HOST_INSTRUCTIONS = "Answer questions about call center operations"
+HOST_INSTRUCTIONS = "Answer questions about job-search email workflows"
 
 logger = logging.getLogger(__name__)
 

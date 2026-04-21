@@ -57,9 +57,12 @@ def test_fetch_chart_data_with_filters_basic(create_test_client):
         client = create_test_client()
         payload = {
             "selected_filters": {
-                "Topic": ["Tech"],
-                "Sentiment": ["Positive"],
-                "DateRange": ["Last 30 Days"]
+                "Company": ["Contoso"],
+                "Portal": ["Workday"],
+                "Category": ["Interview Invitation"],
+                "Urgency": ["High"],
+                "ActionRequired": ["true"],
+                "DateRange": ["Last 30 days"]
             }
         }
         response = client.post("/fetchChartDataWithFilters", json=payload)
@@ -84,9 +87,12 @@ def test_fetch_chart_data_with_filters_error(create_test_client):
         client = create_test_client()
         payload = {
             "selected_filters": {
-                "Topic": ["Tech"],
-                "Sentiment": ["Positive"],
-                "DateRange": ["Last 30 Days"]
+                "Company": ["Contoso"],
+                "Portal": ["Workday"],
+                "Category": ["Interview Invitation"],
+                "Urgency": ["High"],
+                "ActionRequired": ["true"],
+                "DateRange": ["Last 30 days"]
             }
         }
         response = client.post("/fetchChartDataWithFilters", json=payload)
