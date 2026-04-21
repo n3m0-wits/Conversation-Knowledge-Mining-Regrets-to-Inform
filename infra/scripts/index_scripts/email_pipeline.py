@@ -27,6 +27,7 @@ from content_understanding_client import AzureContentUnderstandingClient
 
 INDEX_NAME = "call_transcripts_index"
 ANALYZER_ID = "ckm-json"
+QUALITY_REVIEW_SAMPLE_RATE = 0.05
 
 CATEGORIES = {
     "Job Ad",
@@ -74,9 +75,9 @@ class EmailMessage:
 
 
 def _html_to_text(value: str) -> str:
-    text = re.sub(r"<script[\\s\\S]*?</script>", " ", value, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<br\\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
@@ -263,7 +264,7 @@ def _chunk_text(text: str, tokens_per_chunk: int = 1024) -> list[str]:
     tokens = cleaned.split()
     chunks = []
     for idx in range(0, len(tokens), tokens_per_chunk):
-        chunks.append(" ".join(tokens[idx: idx + tokens_per_chunk]))
+        chunks.append(" ".join(tokens[idx:idx + tokens_per_chunk]))
     return chunks
 
 
@@ -626,7 +627,7 @@ def _upsert_review_record(cursor: pyodbc.Cursor, record: dict[str, Any]) -> None
     elif record["company"] == "Unknown":
         review_reason = "Unknown company"
         needs_review = True
-    elif random.random() < 0.05:
+    elif random.random() < QUALITY_REVIEW_SAMPLE_RATE:
         review_reason = "Sampled quality review"
         needs_review = True
 
