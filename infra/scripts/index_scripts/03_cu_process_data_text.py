@@ -25,7 +25,6 @@ parser.add_argument("--graph_backfill_limit", type=int, default=500)
 parser.add_argument("--ingestion_source", choices=["historical", "live"], default="historical")
 parser.add_argument("--live_emails_path", default="")
 parser.add_argument("--live_source_folder", default="live")
-parser.add_argument("--live_source_folder", default="live")
 
 args = parser.parse_args()
 
