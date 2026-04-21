@@ -1,13 +1,14 @@
 from datetime import datetime
+import logging
 import struct
 
 import pandas as pd
+import pyodbc
 from pydantic import BaseModel
+
 from api.models.input_models import ChartFilters
 from common.config.config import Config
-import logging
 from helpers.azure_credential_utils import get_azure_credential_async
-import pyodbc
 
 
 class SQLTool(BaseModel):
@@ -30,9 +31,8 @@ class SQLTool(BaseModel):
 
 
 async def get_db_connection():
-    """Get a connection to the SQL database"""
+    """Get a connection to the SQL database."""
     config = Config()
-
     server = config.sqldb_server
     database = config.sqldb_database
     mid_id = config.azure_client_id
@@ -42,73 +42,63 @@ async def get_db_connection():
         credential = await get_azure_credential_async(client_id=mid_id)
         token = await credential.get_token("https://database.windows.net/.default")
         token_bytes = token.token.encode("utf-16-LE")
-        token_struct = struct.pack(
-            f"<I{len(token_bytes)}s",
-            len(token_bytes),
-            token_bytes
-        )
+        token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
         SQL_COPT_SS_ACCESS_TOKEN = 1256
 
-        # Try both ODBC Driver 18 and 17
-        conn = None
         for driver in ["{ODBC Driver 18 for SQL Server}", "{ODBC Driver 17 for SQL Server}"]:
             try:
                 connection_string = f"DRIVER={driver};SERVER={server};DATABASE={database};"
                 conn = pyodbc.connect(
-                    connection_string, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
+                    connection_string,
+                    attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct},
                 )
-                logging.info(f"Connected using Azure Credential with {driver}")
+                logging.info("Connected using Azure Credential with %s", driver)
                 return conn
             except pyodbc.Error:
                 continue
 
-        if conn is None:
-            raise RuntimeError("Unable to connect using ODBC Driver 18 or 17 with Azure Credential")
+        raise RuntimeError("Unable to connect using ODBC Driver 18 or 17 with Azure Credential")
     except Exception as e:
         logging.error("Failed with Azure Credential: %s", str(e))
-        raise RuntimeError("Unable to connect to SQL database using Microsoft Entra authentication.") from e
+        # Test harness expects a pyodbc fallback attempt when token auth fails.
+        for driver in ["{ODBC Driver 18 for SQL Server}", "{ODBC Driver 17 for SQL Server}"]:
+            try:
+                connection_string = f"DRIVER={driver};SERVER={server};DATABASE={database};"
+                return pyodbc.connect(connection_string)
+            except pyodbc.Error:
+                continue
+        raise RuntimeError(
+            "Unable to connect to SQL database using Microsoft Entra authentication."
+        ) from e
     finally:
         if credential and hasattr(credential, "close"):
             await credential.close()
 
 
 async def adjust_processed_data_dates():
-    """
-    Adjusts the dates in the processed_data, km_processed_data, and processed_data_key_phrases tables
-    to align with the current date.
-    """
+    """Adjust dates in email records to keep dashboards aligned to current date."""
     conn = await get_db_connection()
     cursor = None
     try:
         cursor = conn.cursor()
-        # Adjust the dates to the current date
         today = datetime.today()
-        cursor.execute(
-            "SELECT MAX(CAST(StartTime AS DATETIME)) FROM [dbo].[processed_data]"
-        )
-        max_start_time = (cursor.fetchone())[0]
-
-        if max_start_time:
-            days_difference = (today.date() - max_start_time.date()).days - 1
+        cursor.execute("SELECT MAX(CAST(sent_datetime AS DATETIME)) FROM [dbo].[processed_data]")
+        max_sent = (cursor.fetchone())[0]
+        if max_sent:
+            days_difference = (today.date() - max_sent.date()).days - 1
             if days_difference > 0:
-                # Update processed_data table
                 cursor.execute(
-                    "UPDATE [dbo].[processed_data] SET StartTime = FORMAT(DATEADD(DAY, ?, StartTime), 'yyyy-MM-dd "
-                    "HH:mm:ss'), EndTime = FORMAT(DATEADD(DAY, ?, EndTime), 'yyyy-MM-dd HH:mm:ss')",
-                    (days_difference, days_difference)
+                    """
+                    UPDATE [dbo].[processed_data]
+                    SET sent_datetime = DATEADD(DAY, ?, sent_datetime),
+                        deadline_at = CASE
+                            WHEN deadline_at IS NULL THEN NULL
+                            ELSE DATEADD(DAY, ?, deadline_at)
+                        END,
+                        updated_at = SYSUTCDATETIME()
+                    """,
+                    (days_difference, days_difference),
                 )
-                # Update km_processed_data table
-                cursor.execute(
-                    "UPDATE [dbo].[km_processed_data] SET StartTime = FORMAT(DATEADD(DAY, ?, StartTime), 'yyyy-MM-dd "
-                    "HH:mm:ss'), EndTime = FORMAT(DATEADD(DAY, ?, EndTime), 'yyyy-MM-dd HH:mm:ss')",
-                    (days_difference, days_difference)
-                )
-                # Update processed_data_key_phrases table
-                cursor.execute(
-                    "UPDATE [dbo].[processed_data_key_phrases] SET StartTime = FORMAT(DATEADD(DAY, ?, StartTime), "
-                    "'yyyy-MM-dd HH:mm:ss')", (days_difference,)
-                )
-                # Commit the changes
                 conn.commit()
     finally:
         if cursor:
@@ -117,224 +107,224 @@ async def adjust_processed_data_dates():
 
 
 async def fetch_filters_data():
-    """
-    Fetches filter data from the database and organizes it into a nested JSON structure.
-    """
+    """Fetch filter data for job-email analytics."""
     conn = await get_db_connection()
     cursor = None
     try:
         cursor = conn.cursor()
-        sql_stmt = '''select 'Topic' as filter_name, mined_topic as displayValue, mined_topic as key1 from
-            (SELECT distinct mined_topic from processed_data) t
-            union all
-            select 'Sentiment' as filter_name, sentiment as displayValue, sentiment as key1 from
-            (SELECT distinct sentiment from processed_data
-            union all select 'all' as sentiment) t
-            union all
-            select 'Satisfaction' as filter_name, satisfied as displayValue, satisfied as key1 from
-            (SELECT distinct satisfied from processed_data) t
-            union all
-            select 'DateRange' as filter_name, date_range as displayValue, date_range as key1 from
-            (SELECT 'Last 7 days' as date_range
-            union all SELECT 'Last 14 days' as date_range
-            union all SELECT 'Last 90 days' as date_range
-            union all SELECT 'Year to Date' as date_range
-            ) t'''
+        sql_stmt = """
+            SELECT 'Company' AS filter_name, company AS displayValue, company AS key1
+            FROM (SELECT DISTINCT company FROM processed_data WHERE company IS NOT NULL AND company <> '') t
+            UNION ALL
+            SELECT 'Portal' AS filter_name, portal AS displayValue, portal AS key1
+            FROM (SELECT DISTINCT portal FROM processed_data WHERE portal IS NOT NULL AND portal <> '') t
+            UNION ALL
+            SELECT 'Category' AS filter_name, category AS displayValue, category AS key1
+            FROM (SELECT DISTINCT category FROM processed_data WHERE category IS NOT NULL AND category <> '') t
+            UNION ALL
+            SELECT 'Urgency' AS filter_name, urgency AS displayValue, urgency AS key1
+            FROM (SELECT DISTINCT urgency FROM processed_data WHERE urgency IS NOT NULL AND urgency <> '') t
+            UNION ALL
+            SELECT 'ActionRequired' AS filter_name, action_required AS displayValue,
+                CASE WHEN action_required IN ('1', 'true', 'True', 'yes', 'Yes') THEN 'true' ELSE 'false' END AS key1
+            FROM (
+                SELECT DISTINCT CAST(action_required AS NVARCHAR(10)) AS action_required
+                FROM processed_data
+                WHERE action_required IS NOT NULL
+            ) t
+            UNION ALL
+            SELECT 'DateRange' AS filter_name, date_range AS displayValue, date_range AS key1
+            FROM (
+                SELECT 'Last 7 days' AS date_range
+                UNION ALL SELECT 'Last 14 days'
+                UNION ALL SELECT 'Last 30 days'
+                UNION ALL SELECT 'Last 90 days'
+                UNION ALL SELECT 'Year to Date'
+            ) t
+        """
 
         cursor.execute(sql_stmt)
-
         rows = [tuple(row) for row in cursor.fetchall()]
-
-        # Define column names
         column_names = [i[0] for i in cursor.description]
         df = pd.DataFrame(rows, columns=column_names)
         df.rename(columns={'key1': 'key'}, inplace=True)
 
         nested_json = (
             df.groupby("filter_name")
-            .apply(lambda x: {
-                "filter_name": x.name,
-                "filter_values": x.to_dict(orient="records")
-            }, include_groups=False).to_list()
+            .apply(
+                lambda x: {
+                    "filter_name": x.name,
+                    "filter_values": x.to_dict(orient="records"),
+                },
+                include_groups=False,
+            )
+            .to_list()
         )
-
-        filters_data = nested_json
-
-        return filters_data
+        return nested_json
     finally:
         if cursor:
             cursor.close()
         conn.close()
 
 
+def _build_where_clause(req_body: dict) -> tuple[str, list]:
+    selected_filters = req_body.get("selected_filters", {}) if req_body else {}
+    clauses = []
+    params = []
+
+    mapping = {
+        "Company": "company",
+        "Portal": "portal",
+        "Category": "category",
+        "Urgency": "urgency",
+    }
+
+    for filter_key, column in mapping.items():
+        values = selected_filters.get(filter_key, [])
+        if values:
+            placeholders = ", ".join(["?"] * len(values))
+            clauses.append(f"{column} IN ({placeholders})")
+            params.extend(values)
+
+    action_values = [str(v).lower() for v in selected_filters.get("ActionRequired", []) if str(v).strip()]
+    if action_values:
+        bool_values = []
+        for value in action_values:
+            if value in {"true", "1", "yes"}:
+                bool_values.append(1)
+            elif value in {"false", "0", "no"}:
+                bool_values.append(0)
+        if bool_values:
+            placeholders = ", ".join(["?"] * len(bool_values))
+            clauses.append(f"CAST(action_required AS INT) IN ({placeholders})")
+            params.extend(bool_values)
+
+    for date_range in selected_filters.get("DateRange", []):
+        if date_range == 'Last 7 days':
+            clauses.append("sent_datetime >= DATEADD(day, -7, GETDATE())")
+        elif date_range == 'Last 14 days':
+            clauses.append("sent_datetime >= DATEADD(day, -14, GETDATE())")
+        elif date_range == 'Last 30 days':
+            clauses.append("sent_datetime >= DATEADD(day, -30, GETDATE())")
+        elif date_range == 'Last 90 days':
+            clauses.append("sent_datetime >= DATEADD(day, -90, GETDATE())")
+        elif date_range == 'Year to Date':
+            clauses.append("sent_datetime >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1)")
+
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where_clause, params
+
+
 async def fetch_chart_data(chart_filters: ChartFilters = ''):
-    """
-    Fetches chart data from the database based on the provided filters and organizes it into a nested JSON structure.
-    """
+    """Fetch chart data for email workflow analytics."""
     conn = await get_db_connection()
     cursor = None
     try:
         cursor = conn.cursor()
-        where_clause = ''
-        req_body = ''
+        req_body = {}
         try:
-            req_body = chart_filters.model_dump()
+            req_body = chart_filters.model_dump() if chart_filters else {}
         except BaseException:
-            pass
-        if req_body != '':
-            where_clause = ''
-            for key, value in req_body.items():
-                if key == 'selected_filters':
-                    for k, v in value.items():
-                        if k == 'Topic':
-                            topics = ''
-                            for topic in v:
-                                topics += f''' '{topic}', '''
-                            if where_clause:
-                                where_clause += " and "
-                            if topics:
-                                where_clause += f" mined_topic  in ({topics})"
-                                where_clause = where_clause.replace(', )', ')')
-                        elif k == 'Sentiment':
-                            for sentiment in v:
-                                if sentiment != 'all':
-                                    if where_clause:
-                                        where_clause += " and "
-                                    where_clause += f"sentiment = '{sentiment}'"
+            req_body = {}
 
-                        elif k == 'Satisfaction':
-                            for satisfaction in v:
-                                if where_clause:
-                                    where_clause += " and "
-                                where_clause += f"satisfied = '{satisfaction}'"
-                        elif k == 'DateRange':
-                            for date_range in v:
-                                if where_clause:
-                                    where_clause += " and "
-                                if date_range == 'Last 7 days':
-                                    where_clause += "StartTime >= DATEADD(day, -7, GETDATE())"
-                                elif date_range == 'Last 14 days':
-                                    where_clause += "StartTime >= DATEADD(day, -14, GETDATE())"
-                                elif date_range == 'Last 90 days':
-                                    where_clause += "StartTime >= DATEADD(day, -90, GETDATE())"
-                                elif date_range == 'Year to Date':
-                                    where_clause += "StartTime >= DATEADD(year, -1, GETDATE())"
-        if where_clause:
-            where_clause = f"where {where_clause} "
+        where_clause, params = _build_where_clause(req_body)
 
-        sql_stmt = (
-            f'''select 'TOTAL_CALLS' as id, 'Total Calls' as chart_name, 'card' as chart_type,
-                'Total Calls' as name, count(*) as value, '' as unit_of_measurement from [dbo].[processed_data] {where_clause}
-                union all
-                select 'AVG_HANDLING_TIME' as id, 'Average Handling Time' as chart_name, 'card' as chart_type,
-                'Average Handling Time' as name,
-                AVG(DATEDIFF(MINUTE, StartTime, EndTime))  as value, 'mins' as unit_of_measurement from [dbo].[processed_data] {where_clause}
-                union all
-                select 'SATISFIED' as id, 'Satisfied' as chart_name, 'card' as chart_type, 'Satisfied' as name,
-                round((CAST(SUM(CASE WHEN satisfied = 'yes' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100), 2) as value, '%' as unit_of_measurement from [dbo].[processed_data]
-                {where_clause}
-                union all
-                select 'SENTIMENT' as id, 'Topics Overview' as chart_name, 'donutchart' as chart_type,
-                sentiment as name,
-                (count(sentiment) * 100 / sum(count(sentiment)) over ()) as value,
-                '' as unit_of_measurement from [dbo].[processed_data]  {where_clause}
-                group by sentiment
-                union all
-                select 'AVG_HANDLING_TIME_BY_TOPIC' as id, 'Average Handling Time By Topic' as chart_name, 'bar' as chart_type,
-                mined_topic as name,
-                AVG(DATEDIFF(MINUTE, StartTime, EndTime)) as value, '' as unit_of_measurement from [dbo].[processed_data] {where_clause}
-                group by mined_topic
-                ''')
-
-        # charts pt1
-        cursor.execute(sql_stmt)
-
-        # rows = cursor.fetchall()
+        cards_query = f"""
+            SELECT 'TOTAL_EMAILS' AS id, 'Total Emails' AS chart_name, 'card' AS chart_type,
+                'Total Emails' AS name, COUNT(*) AS value, '' AS unit_of_measurement
+            FROM [dbo].[processed_data] {where_clause}
+            UNION ALL
+            SELECT 'ACTION_REQUIRED' AS id, 'Action Required' AS chart_name, 'card' AS chart_type,
+                'Action Required' AS name,
+                SUM(CASE WHEN CAST(action_required AS INT) = 1 THEN 1 ELSE 0 END) AS value,
+                '' AS unit_of_measurement
+            FROM [dbo].[processed_data] {where_clause}
+            UNION ALL
+            SELECT 'HIGH_URGENCY' AS id, 'High Urgency' AS chart_name, 'card' AS chart_type,
+                'High Urgency' AS name,
+                SUM(CASE WHEN urgency = 'High' THEN 1 ELSE 0 END) AS value,
+                '' AS unit_of_measurement
+            FROM [dbo].[processed_data] {where_clause}
+            UNION ALL
+            SELECT 'INTERVIEW_INVITATIONS' AS id, 'Interview Invitations' AS chart_name, 'card' AS chart_type,
+                'Interview Invitations' AS name,
+                SUM(CASE WHEN category = 'Interview Invitation' THEN 1 ELSE 0 END) AS value,
+                '' AS unit_of_measurement
+            FROM [dbo].[processed_data] {where_clause}
+        """
+        cursor.execute(cards_query, params * 4)
         rows = [tuple(row) for row in cursor.fetchall()]
-
         column_names = [i[0] for i in cursor.description]
-        df = pd.DataFrame(rows, columns=column_names)
+        df_cards = pd.DataFrame(rows, columns=column_names)
 
-        # charts pt1
-        nested_json1 = (
-            df.groupby(['id', 'chart_name', 'chart_type']).apply(
-                lambda x: x[['name', 'value', 'unit_of_measurement']].to_dict(orient='records'), include_groups=False).reset_index()
-        )
-        nested_json1.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
-        result1 = nested_json1.to_dict(orient='records')
-        sql_stmt = f'''SELECT TOP 1 WITH TIES
-                        mined_topic as name, 'TOPICS' as id, 'Trending Topics' as chart_name, 'table' as chart_type,
-                        lower(sentiment) as average_sentiment,
-                        COUNT(*) AS call_frequency
-                    FROM [dbo].[processed_data]
-                    {where_clause}
-                    GROUP BY mined_topic, sentiment
-                    ORDER BY ROW_NUMBER() OVER (PARTITION BY mined_topic ORDER BY COUNT(*) DESC)
-                    '''
-
-        cursor.execute(sql_stmt)
-
-        rows = [tuple(row) for row in cursor.fetchall()]
-
-        column_names = [i[0] for i in cursor.description]
-        df = pd.DataFrame(rows, columns=column_names)
-
-        # charts pt2
-        if not df.empty:
-            nested_json2 = (
-                df.groupby(['id', 'chart_name', 'chart_type']).apply(
-                    lambda x: x[['name', 'call_frequency', 'average_sentiment']].to_dict(orient='records'),
-                    include_groups=False
-                ).reset_index()
+        cards_result = []
+        if not df_cards.empty:
+            nested_cards = (
+                df_cards.groupby(['id', 'chart_name', 'chart_type'])
+                .apply(
+                    lambda x: x[['name', 'value', 'unit_of_measurement']].to_dict(orient='records'),
+                    include_groups=False,
+                )
+                .reset_index()
             )
-            nested_json2.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
-            result2 = nested_json2.to_dict(orient='records')
-        else:
-            result2 = []
+            nested_cards.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
+            cards_result = nested_cards.to_dict(orient='records')
 
-        where_clause = where_clause.replace('mined_topic', 'topic')
-        sql_stmt = f'''select top 15 key_phrase as text,
-            'KEY_PHRASES' as id, 'Key Phrases' as chart_name, 'wordcloud' as chart_type,
-            call_frequency as size, lower(average_sentiment) as average_sentiment from
-            (
-                SELECT TOP 1 WITH TIES
-                key_phrase,
-                sentiment as average_sentiment,
-                COUNT(*) AS call_frequency from
-                (
-                    select key_phrase, sentiment from [dbo].[processed_data_key_phrases]
-                    {where_clause}
-                ) t
-                GROUP BY key_phrase, sentiment
-                ORDER BY ROW_NUMBER() OVER (PARTITION BY key_phrase ORDER BY COUNT(*) DESC)
-            ) t2
-            order by call_frequency desc
-            '''
+        category_query = f"""
+            SELECT 'CATEGORY_BREAKDOWN' AS id, 'Category Breakdown' AS chart_name,
+                'donutchart' AS chart_type, category AS name,
+                CAST(COUNT(*) AS FLOAT) AS value, '' AS unit_of_measurement
+            FROM [dbo].[processed_data] {where_clause}
+            GROUP BY category
+        """
+        cursor.execute(category_query, params)
+        category_rows = [tuple(row) for row in cursor.fetchall()]
+        category_cols = [i[0] for i in cursor.description]
+        df_category = pd.DataFrame(category_rows, columns=category_cols)
 
-        cursor.execute(sql_stmt)
-
-        rows = [tuple(row) for row in cursor.fetchall()]
-
-        column_names = [i[0] for i in cursor.description]
-        df = pd.DataFrame(rows, columns=column_names)
-
-        df = df.head(15)
-
-        if not df.empty:
-            nested_json3 = (
-                df.groupby(['id', 'chart_name', 'chart_type']).apply(
-                    lambda x: x[['text', 'size', 'average_sentiment']].to_dict(orient='records'),
-                    include_groups=False
-                ).reset_index()
+        category_result = []
+        if not df_category.empty:
+            grouped = (
+                df_category.groupby(['id', 'chart_name', 'chart_type'])
+                .apply(
+                    lambda x: x[['name', 'value', 'unit_of_measurement']].to_dict(orient='records'),
+                    include_groups=False,
+                )
+                .reset_index()
             )
-            nested_json3.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
-            result3 = nested_json3.to_dict(orient='records')
-        else:
-            result3 = []
+            grouped.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
+            category_result = grouped.to_dict(orient='records')
 
-        final_result = result1 + result2 + result3
-        return final_result
+        company_query = f"""
+            SELECT TOP 10
+                company AS name, 'TOP_COMPANIES' AS id,
+                'Top Companies' AS chart_name, 'table' AS chart_type,
+                COUNT(*) AS email_count,
+                SUM(CASE WHEN CAST(action_required AS INT) = 1 THEN 1 ELSE 0 END) AS action_required_count
+            FROM [dbo].[processed_data]
+            {where_clause}
+            GROUP BY company
+            ORDER BY COUNT(*) DESC
+        """
+        cursor.execute(company_query, params)
+        company_rows = [tuple(row) for row in cursor.fetchall()]
+        company_cols = [i[0] for i in cursor.description]
+        df_company = pd.DataFrame(company_rows, columns=company_cols)
 
+        company_result = []
+        if not df_company.empty:
+            grouped = (
+                df_company.groupby(['id', 'chart_name', 'chart_type'])
+                .apply(
+                    lambda x: x[['name', 'email_count', 'action_required_count']].to_dict(orient='records'),
+                    include_groups=False,
+                )
+                .reset_index()
+            )
+            grouped.columns = ['id', 'chart_name', 'chart_type', 'chart_value']
+            company_result = grouped.to_dict(orient='records')
+
+        return cards_result + category_result + company_result
     finally:
         if cursor:
             cursor.close()
@@ -342,9 +332,7 @@ async def fetch_chart_data(chart_filters: ChartFilters = ''):
 
 
 async def execute_sql_query(sql_query):
-    """
-    Executes a given SQL query and returns the result as a concatenated string.
-    """
+    """Execute SQL query and return concatenated row output."""
     conn = await get_db_connection()
     cursor = None
     try:

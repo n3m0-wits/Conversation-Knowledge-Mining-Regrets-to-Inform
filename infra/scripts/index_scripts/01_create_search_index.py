@@ -13,6 +13,7 @@ from azure.search.documents.indexes.models import (
     SemanticField,
     SemanticPrioritizedFields,
     SemanticSearch,
+    SimpleField,
     VectorSearch,
     VectorSearchProfile,
 )
@@ -32,41 +33,42 @@ INDEX_NAME = "call_transcripts_index"
 
 
 def create_search_index():
-    """
-    Creates or updates an Azure Cognitive Search index configured for:
-    - Text fields
-    - Vector search using Azure OpenAI embeddings
-    - Semantic search using prioritized fields
-    """
-    # Shared credential
+    """Create or update search index for email records and embeddings."""
     credential = AzureCliCredential(process_timeout=30)
-
     index_client = SearchIndexClient(endpoint=SEARCH_ENDPOINT, credential=credential)
 
-    # Define index schema
     fields = [
-        SearchField(name="id", type=SearchFieldDataType.String, key=True),
-        SearchField(name="chunk_id", type=SearchFieldDataType.String),
-        SearchField(name="content", type=SearchFieldDataType.String),
-        SearchField(name="sourceurl", type=SearchFieldDataType.String),
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+        SimpleField(name="chunk_id", type=SearchFieldDataType.String, filterable=True),
+        SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
+        SearchField(name="sourceurl", type=SearchFieldDataType.String, searchable=True),
+        SimpleField(
+            name="source_message_key",
+            type=SearchFieldDataType.String,
+            filterable=True,
+            sortable=True,
+        ),
+        SearchField(name="company", type=SearchFieldDataType.String, filterable=True, searchable=True),
+        SearchField(name="portal", type=SearchFieldDataType.String, filterable=True, searchable=True),
+        SearchField(name="category", type=SearchFieldDataType.String, filterable=True, searchable=True),
+        SearchField(name="urgency", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="action_required", type=SearchFieldDataType.Boolean, filterable=True),
+        SimpleField(name="sent_datetime", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
         SearchField(
             name="contentVector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             vector_search_dimensions=1536,
-            vector_search_profile_name="myHnswProfile"
-        )
+            vector_search_profile_name="myHnswProfile",
+        ),
     ]
 
-    # Define vector search settings
     vector_search = VectorSearch(
-        algorithms=[
-            HnswAlgorithmConfiguration(name="myHnsw")
-        ],
+        algorithms=[HnswAlgorithmConfiguration(name="myHnsw")],
         profiles=[
             VectorSearchProfile(
                 name="myHnswProfile",
                 algorithm_configuration_name="myHnsw",
-                vectorizer_name="myOpenAI"
+                vectorizer_name="myOpenAI",
             )
         ],
         vectorizers=[
@@ -76,30 +78,28 @@ def create_search_index():
                 parameters=AzureOpenAIVectorizerParameters(
                     resource_url=OPENAI_ENDPOINT,
                     deployment_name=EMBEDDING_MODEL,
-                    model_name=EMBEDDING_MODEL
-                )
+                    model_name=EMBEDDING_MODEL,
+                ),
             )
-        ]
+        ],
     )
 
-    # Define semantic configuration
     semantic_config = SemanticConfiguration(
         name="my-semantic-config",
         prioritized_fields=SemanticPrioritizedFields(
-            keywords_fields=[SemanticField(field_name="chunk_id")],
-            content_fields=[SemanticField(field_name="content")]
-        )
+            keywords_fields=[
+                SemanticField(field_name="company"),
+                SemanticField(field_name="category"),
+            ],
+            content_fields=[SemanticField(field_name="content")],
+        ),
     )
 
-    # Create the semantic settings with the configuration
-    semantic_search = SemanticSearch(configurations=[semantic_config])
-
-    # Define and create the index
     index = SearchIndex(
         name=INDEX_NAME,
         fields=fields,
         vector_search=vector_search,
-        semantic_search=semantic_search
+        semantic_search=SemanticSearch(configurations=[semantic_config]),
     )
 
     result = index_client.create_or_update_index(index)
