@@ -735,8 +735,17 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
     if not args.live_emails_path:
         raise ValueError("live_emails_path is required when ingestion_source=live")
 
-    with open(args.live_emails_path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    try:
+        with open(args.live_emails_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except OSError as error:
+        raise ValueError(
+            f"Unable to read live email payload file: {args.live_emails_path}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Live email payload file is not valid JSON: {args.live_emails_path}"
+        ) from error
 
     if isinstance(payload, dict):
         payload = payload.get("emails", [])
@@ -747,23 +756,40 @@ def _load_live_messages(args: Any) -> list[EmailMessage]:
     for message in payload:
         if not isinstance(message, dict):
             continue
-        if message.get("from") and not message.get("toRecipients"):
+        sender = message.get("from")
+        has_graph_sender = isinstance(sender, dict) and isinstance(
+            sender.get("emailAddress"), dict
+        )
+        if not has_graph_sender:
             message = {
                 "id": message.get("id", ""),
                 "internetMessageId": message.get("internetMessageId", ""),
                 "subject": message.get("subject", ""),
-                "from": {"emailAddress": {"address": message.get("from", "")}},
+                "from": {"emailAddress": {"address": str(sender or "").strip()}},
                 "toRecipients": [
                     {"emailAddress": {"address": address.strip()}}
-                    for address in str(message.get("to", "")).split(",")
+                    for address in (
+                        str(message.get("to") or message.get("to_addresses") or "")
+                    ).split(",")
                     if address.strip()
                 ],
-                "sentDateTime": message.get("date", message.get("sentDateTime", "")),
+                "sentDateTime": (
+                    message.get("date")
+                    or message.get("sent_datetime")
+                    or message.get("sentDateTime", "")
+                ),
                 "body": {
                     "contentType": message.get("contentType", "text"),
-                    "content": message.get("content", ""),
+                    "content": (
+                        message.get("content")
+                        or message.get("body", {}).get("content", "")
+                    ),
                 },
-                "bodyPreview": message.get("content", ""),
+                "bodyPreview": (
+                    message.get("content")
+                    or message.get("bodyPreview")
+                    or message.get("body", {}).get("content", "")
+                ),
             }
         email_message = _to_email_message(message, source_folder="live")
         if email_message.message_key:
