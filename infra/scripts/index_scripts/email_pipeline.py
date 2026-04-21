@@ -75,8 +75,8 @@ class EmailMessage:
 
 
 def _html_to_text(value: str) -> str:
-    text = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<script[\s\S]*?</script\s*>", " ", value, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style\s*>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
