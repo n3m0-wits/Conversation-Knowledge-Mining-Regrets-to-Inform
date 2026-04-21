@@ -610,9 +610,9 @@ python "${pythonScriptPath}04_cu_process_custom_data.py" \
     --solution_name "$solutionName" \
     --graph_user_id "${GRAPH_USER_ID:-me}" \
     --graph_mail_folders "${GRAPH_MAIL_FOLDERS:-Inbox}" \
-    --graph_delta_link_path "${GRAPH_DELTA_LINK_PATH:-infra/data/email/graph_delta_links.json}" \
     --graph_backfill_limit "${GRAPH_BACKFILL_LIMIT:-500}" \
-    --graph_use_delta "${GRAPH_USE_DELTA:-true}"
+    --ingestion_source "${INGESTION_SOURCE:-historical}" \
+    --live_emails_path "${LIVE_EMAILS_PATH:-}"
 
 if [ $? -ne 0 ]; then
 	echo "Error: 04_cu_process_custom_data.py failed."

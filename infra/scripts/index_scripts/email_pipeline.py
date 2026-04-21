@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import random
 import re
 import struct
@@ -12,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import getaddresses
 from html import unescape
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -269,7 +266,7 @@ def _chunk_text(text: str, tokens_per_chunk: int = 1024) -> list[str]:
 
 
 class GraphMailboxClient:
-    """Minimal Graph mailbox reader for backfill + delta sync."""
+    """Minimal Graph mailbox reader for historical mailbox backfill."""
 
     def __init__(self, credential: AzureCliCredential, user_id: str):
         self._credential = credential
@@ -302,7 +299,7 @@ class GraphMailboxClient:
         self,
         folder_id: str,
         limit: int,
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    ) -> list[dict[str, Any]]:
         select_fields = (
             "id,internetMessageId,from,toRecipients,subject,sentDateTime,"
             "receivedDateTime,body,bodyPreview,parentFolderId"
@@ -326,54 +323,7 @@ class GraphMailboxClient:
             messages.extend(values)
             next_url = payload.get("@odata.nextLink")
             current_params = None
-        return messages[:limit], None
-
-    def fetch_delta(
-        self,
-        folder_id: str,
-        prior_delta_link: str | None,
-    ) -> tuple[list[dict[str, Any]], str | None]:
-        select_fields = (
-            "id,internetMessageId,from,toRecipients,subject,sentDateTime,"
-            "receivedDateTime,body,bodyPreview,parentFolderId"
-        )
-        if prior_delta_link:
-            url = prior_delta_link
-            params = None
-        else:
-            url = (
-                f"https://graph.microsoft.com/v1.0/users/{quote(self._user_id)}"
-                f"/mailFolders/{quote(folder_id)}/messages/delta"
-            )
-            params = {"$select": select_fields, "$top": 50}
-
-        messages: list[dict[str, Any]] = []
-        next_url: str | None = url
-        delta_link = prior_delta_link
-        current_params = params
-        while next_url:
-            payload = self._get(next_url, current_params)
-            messages.extend(payload.get("value", []))
-            next_url = payload.get("@odata.nextLink")
-            if payload.get("@odata.deltaLink"):
-                delta_link = payload.get("@odata.deltaLink")
-            current_params = None
-        return messages, delta_link
-
-
-def _load_delta_state(path: str) -> dict[str, str]:
-    delta_path = Path(path)
-    if not delta_path.exists():
-        return {}
-    with delta_path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def _save_delta_state(path: str, state: dict[str, str]) -> None:
-    delta_path = Path(path)
-    delta_path.parent.mkdir(parents=True, exist_ok=True)
-    with delta_path.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2)
+        return messages[:limit]
 
 
 def _coalesce_bool(value: bool | None, default: bool = False) -> bool:
@@ -730,7 +680,34 @@ def _get_sql_connection(server: str, database: str) -> pyodbc.Connection:
     raise RuntimeError("Unable to connect to SQL with ODBC Driver 18 or 17")
 
 
-def _fetch_messages_from_graph(args: Any) -> list[EmailMessage]:
+def _to_email_message(message: dict[str, Any], source_folder: str) -> EmailMessage:
+    content = _normalize_email_text(message)
+    message_id = message.get("id") or message.get("message_id") or ""
+    internet_message_id = (
+        message.get("internetMessageId") or message.get("internet_message_id") or ""
+    )
+    sent_dt_raw = (
+        message.get("sentDateTime")
+        or message.get("date")
+        or message.get("sent_datetime")
+        or message.get("receivedDateTime")
+        or ""
+    )
+    sent_dt = _parse_datetime(sent_dt_raw)
+    return EmailMessage(
+        message_id=message_id,
+        internet_message_id=internet_message_id,
+        subject=(message.get("subject") or "").strip(),
+        from_address=_extract_from_field(message),
+        to_addresses=_extract_to_field(message),
+        sent_datetime=sent_dt.isoformat() if sent_dt else "",
+        folder=source_folder,
+        content=content,
+        raw_json=json.dumps(message, ensure_ascii=False),
+    )
+
+
+def _fetch_historical_messages_from_graph(args: Any) -> list[EmailMessage]:
     credential = AzureCliCredential(process_timeout=30)
     graph_client = GraphMailboxClient(credential=credential, user_id=args.graph_user_id)
 
@@ -738,51 +715,59 @@ def _fetch_messages_from_graph(args: Any) -> list[EmailMessage]:
     if not folders:
         folders = ["inbox"]
 
-    delta_state = _load_delta_state(args.graph_delta_link_path)
     all_messages: list[EmailMessage] = []
 
     for folder in folders:
         folder_id = graph_client.resolve_folder_id(folder)
-        delta_key = f"{args.graph_user_id}:{folder_id}"
-
-        if args.graph_use_delta:
-            messages, new_delta = graph_client.fetch_delta(
-                folder_id,
-                delta_state.get(delta_key),
-            )
-            if new_delta:
-                delta_state[delta_key] = new_delta
-        else:
-            messages, _ = graph_client.fetch_historical(folder_id, args.graph_backfill_limit)
-
+        messages = graph_client.fetch_historical(folder_id, args.graph_backfill_limit)
         for message in messages:
             if "@removed" in message:
                 continue
-            content = _normalize_email_text(message)
-            message_id = message.get("id") or ""
-            internet_message_id = message.get("internetMessageId") or ""
-            sent_dt_raw = message.get("sentDateTime") or message.get("receivedDateTime") or ""
-            sent_dt = _parse_datetime(sent_dt_raw)
-            all_messages.append(
-                EmailMessage(
-                    message_id=message_id,
-                    internet_message_id=internet_message_id,
-                    subject=(message.get("subject") or "").strip(),
-                    from_address=_extract_from_field(message),
-                    to_addresses=_extract_to_field(message),
-                    sent_datetime=sent_dt.isoformat() if sent_dt else "",
-                    folder=folder,
-                    content=content,
-                    raw_json=json.dumps(message, ensure_ascii=False),
-                )
-            )
-
-    if args.graph_use_delta:
-        _save_delta_state(args.graph_delta_link_path, delta_state)
+            all_messages.append(_to_email_message(message, source_folder=folder))
 
     deduped: dict[str, EmailMessage] = {}
     for message in all_messages:
         deduped[message.message_key] = message
+    return list(deduped.values())
+
+
+def _load_live_messages(args: Any) -> list[EmailMessage]:
+    if not args.live_emails_path:
+        raise ValueError("live_emails_path is required when ingestion_source=live")
+
+    with open(args.live_emails_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if isinstance(payload, dict):
+        payload = payload.get("emails", [])
+    if not isinstance(payload, list):
+        raise ValueError("Live email payload must be a JSON array or {\"emails\": [...]}")
+
+    deduped: dict[str, EmailMessage] = {}
+    for message in payload:
+        if not isinstance(message, dict):
+            continue
+        if message.get("from") and not message.get("toRecipients"):
+            message = {
+                "id": message.get("id", ""),
+                "internetMessageId": message.get("internetMessageId", ""),
+                "subject": message.get("subject", ""),
+                "from": {"emailAddress": {"address": message.get("from", "")}},
+                "toRecipients": [
+                    {"emailAddress": {"address": address.strip()}}
+                    for address in str(message.get("to", "")).split(",")
+                    if address.strip()
+                ],
+                "sentDateTime": message.get("date", message.get("sentDateTime", "")),
+                "body": {
+                    "contentType": message.get("contentType", "text"),
+                    "content": message.get("content", ""),
+                },
+                "bodyPreview": message.get("content", ""),
+            }
+        email_message = _to_email_message(message, source_folder="live")
+        if email_message.message_key:
+            deduped[email_message.message_key] = email_message
     return list(deduped.values())
 
 
@@ -803,12 +788,12 @@ async def run_email_pipeline(args: Any) -> None:
     search_credential = AzureCliCredential(process_timeout=30)
     search_client = SearchClient(args.search_endpoint, INDEX_NAME, search_credential)
 
-    if args.graph_skip_ingestion:
-        print("⚠ Graph ingestion skipped by flag.")
-        return
-
-    messages = _fetch_messages_from_graph(args)
-    print(f"✓ Retrieved {len(messages)} unique emails from Graph")
+    if args.ingestion_source == "live":
+        messages = _load_live_messages(args)
+        print(f"✓ Retrieved {len(messages)} unique live emails")
+    else:
+        messages = _fetch_historical_messages_from_graph(args)
+        print(f"✓ Retrieved {len(messages)} unique historical emails from Graph")
 
     conn = _get_sql_connection(args.sql_server, args.sql_database)
     cursor = conn.cursor()

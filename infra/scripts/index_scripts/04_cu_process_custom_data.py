@@ -1,4 +1,4 @@
-"""Process custom Outlook emails (historical or delta) into SQL and Search."""
+"""Process custom Outlook emails (historical or live feed) into SQL and Search."""
 
 import argparse
 import asyncio
@@ -21,17 +21,9 @@ parser.add_argument("--solution_name", required=False, default="ckm-email")
 
 parser.add_argument("--graph_user_id", default="me")
 parser.add_argument("--graph_mail_folders", default="Inbox")
-parser.add_argument(
-    "--graph_delta_link_path",
-    default="infra/data/email/graph_delta_links.json",
-)
 parser.add_argument("--graph_backfill_limit", type=int, default=500)
-parser.add_argument(
-    "--graph_use_delta",
-    type=lambda value: str(value).lower() == "true",
-    default=True,
-)
-parser.add_argument("--graph_skip_ingestion", action="store_true", default=False)
+parser.add_argument("--ingestion_source", choices=["historical", "live"], default="historical")
+parser.add_argument("--live_emails_path", default="")
 
 args = parser.parse_args()
 
